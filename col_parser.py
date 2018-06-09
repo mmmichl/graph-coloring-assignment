@@ -30,6 +30,8 @@ def parse_content(file_content: list):
             raise ParseError("found edges before p")
         elif cmd == 'e' and found_p:
             [edge_from, edge_to] = rest
+            if edge_from == edge_to:
+                raise ParseError("loop detected: {} - {}", edge_from, edge_to)
             nodes[int(edge_from) - 1].append(int(edge_to) - 1)
             nodes[int(edge_to) - 1].append(int(edge_from) - 1)
 
