@@ -41,7 +41,7 @@ def parse_content(file_content: list):
 def parse(filename):
     file_content = []
 
-    print("parsing file", filename)
+    # print("parsing file", filename)
     with open(filename, 'r') as file:
         for line in file:
             file_content.append(line)
