@@ -19,7 +19,7 @@ DEFAULT_ALPHA = 0.6
 DEFAULT_P_MAX = 1_000
 
 MAX_ITERATIONS = 10_000_000
-DEFAULT_TIMEOUT = 1  # in minutes
+DEFAULT_TIMEOUT = 0  # in minutes
 
 
 def main():
@@ -29,9 +29,6 @@ def main():
     parser.add_argument('--colors', dest='num_col', type=int,
                         default=17,
                         help='number of colors (default: 17)')
-    parser.add_argument('--timeout', dest='timeout', type=int,
-                        default=DEFAULT_TIMEOUT,
-                        help='timeout in min for each k-color try (default: %d min)' % DEFAULT_TIMEOUT)
     parser.add_argument('--A', dest='A', type=int,
                         default=DEFAULT_A,
                         help='A of the tabu length calculation (default: %d)' % DEFAULT_A)
@@ -41,14 +38,24 @@ def main():
     parser.add_argument('--p-max', dest='p_max', type=int,
                         default=DEFAULT_P_MAX,
                         help='Pmax for when the reactive tl size should increase (default: %d)' % DEFAULT_P_MAX)
+    parser.add_argument('--timeout', dest='timeout', type=int,
+                        default=DEFAULT_TIMEOUT,
+                        help='timeout in min for each k-color try; 0 to disable (default: %d min)' % DEFAULT_TIMEOUT)
+    parser.add_argument('--no-opt', dest='do_opt', action="store_false",
+                        default=True,
+                        help='Do not try to find the minimal color, quit after finishing run with defined color')
+    parser.add_argument('--re-run', dest='re_runs', type=int,
+                        default=1,
+                        help='How often each file should be re-run (default: 1)')
 
     args = parser.parse_args()
 
     for filename in args.files:
-        sample_start_perf = perf_counter()
-        process_graph(filename, args.num_col, args.timeout * 60, args.A, args.alpha, args.p_max)
-        print("overall duration for %s: %f s\n"
-              % (filename, perf_counter() - sample_start_perf))
+        for re_run in range(args.re_runs):
+            sample_start_perf = perf_counter()
+            process_graph(filename, args.num_col, args.timeout * 60, args.A, args.alpha, args.p_max, args.do_opt)
+            print("#%d overall duration for %s: %f s\n"
+                  % (re_run + 1, filename, perf_counter() - sample_start_perf))
 
 
 def init_gamma(adj_matrix, gamma, init_coloring):
@@ -78,9 +85,10 @@ def count_conflicts(adj_matrix, init_coloring) -> int:
     return conflict_cnt
 
 
-def process_graph(filename: str, color_cnt: int, timeout: int, A: int, alpha: float, p_max: int):
+def process_graph(filename: str, color_cnt: int, timeout: int, A: int, alpha: float, p_max: int, do_opt: bool):
     name, node_cnt, edge_cnt, nodes = parse(filename)
-    print(filename, "- read complete; nodes:", node_cnt, " edges:", edge_cnt, " color count:", color_cnt)
+    print(filename, "- read complete; nodes: %d, edges: %d, color count: %d, A: %d, alpha: %f, Pmax: %d"
+          % (node_cnt, edge_cnt, color_cnt, A, alpha, p_max))
 
     adj_matrix = [[False for _ in range(node_cnt)] for _ in range(node_cnt)]
     for node in range(node_cnt):
@@ -121,19 +129,20 @@ def process_graph(filename: str, color_cnt: int, timeout: int, A: int, alpha: fl
 
             conflict_cnt = count_conflicts(adj_matrix, coloring)
 
-            if old_conflict_cnt != conflict_cnt and conflict_cnt < 5:
-                print("conflict count", conflict_cnt)
-            old_conflict_cnt = conflict_cnt
-
             # reactive increasing of tl size
             if old_conflict_cnt == conflict_cnt:
                 if last_p_change + p_max <= iter_counter:
                     last_p_change = iter_counter
                     tl_extension += 1
-                    print("Pmax reached, increse to", tl_extension)
+                    # if tl_extension == 1 or tl_extension % 20 == 0:
+                    #     print("Pmax reached, increase to", tl_extension)
             else:
                 last_p_change = iter_counter
                 tl_extension = 0
+                # if conflict_cnt < 5:
+                #     print("conflict count", conflict_cnt)
+
+            old_conflict_cnt = conflict_cnt
 
             # Stop criteria - moved here so the evaluation function only needs to be run once
             if conflict_cnt < min_conflicts:
@@ -158,7 +167,7 @@ def process_graph(filename: str, color_cnt: int, timeout: int, A: int, alpha: fl
                         delta = gamma[n][c] - gamma[n][coloring[n]]
 
                         if delta < best_delta:
-                            # if not tabu OR if Aspiration criterion is met
+                            # if not tabu OR if Aspiration criterion is met: found a new all-time best
                             if tabu_list[n][c] < iter_counter or delta + conflict_cnt < min_conflicts:
                                 best_node = n
                                 best_color = c
@@ -180,11 +189,16 @@ def process_graph(filename: str, color_cnt: int, timeout: int, A: int, alpha: fl
             iter_counter += 1
             if iter_counter == MAX_ITERATIONS:
                 print("Max iteration count reached (%d), aborting search" % MAX_ITERATIONS)
-                return best_coloring
+                return None
 
             if (perf_counter() - start_time) > timeout:
                 print("Timeout reached (%d), aborting search" % timeout)
-                return best_coloring
+                return None
+
+        print("Found solution within %f min" % ((perf_counter() - start_time) / 60.))
+        # print_matrix([best_coloring])
+        if not do_opt:
+            return best_coloring
 
         color_cnt -= 1
 
