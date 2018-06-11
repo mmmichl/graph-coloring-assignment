@@ -1,0 +1,8 @@
+algo = python3 smac_wrapper.py
+paramfile = scenario-tiny.pcs
+instance_file = scenario-tiny.inst
+run_obj = runtime
+cutoff_time = 900
+runcount_limit = 500
+deterministic = 0
+wallclock_limit = 25200

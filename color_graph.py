@@ -8,7 +8,9 @@ implementation of a optimized tabu search from the paper:
 """
 
 import argparse
+import ntpath
 from random import randint
+from statistics import mean, variance, stdev
 from time import perf_counter, process_time
 
 from col_parser import parse
@@ -17,6 +19,7 @@ from helpers import print_adj_matrix, print_matrix
 DEFAULT_A = 10
 DEFAULT_ALPHA = 0.6
 DEFAULT_P_MAX = 1_000
+DEFAULT_STOP_K = 5
 
 MAX_ITERATIONS = 10_000_000
 DEFAULT_TIMEOUT = 0  # in minutes
@@ -38,6 +41,9 @@ def main():
     parser.add_argument('--p-max', dest='p_max', type=int,
                         default=DEFAULT_P_MAX,
                         help='Pmax for when the reactive tl size should increase (default: %d)' % DEFAULT_P_MAX)
+    parser.add_argument('--stop-k', dest='stop_k', type=int,
+                        default=DEFAULT_STOP_K,
+                        help='Stop if a solution can be found with k colors (default: %d)' % DEFAULT_STOP_K)
     parser.add_argument('--timeout', dest='timeout', type=int,
                         default=DEFAULT_TIMEOUT,
                         help='timeout in min for each k-color try; 0 to disable (default: %d min)' % DEFAULT_TIMEOUT)
@@ -51,11 +57,38 @@ def main():
     args = parser.parse_args()
 
     for filename in args.files:
+        statistics = []
         for re_run in range(args.re_runs):
             sample_start_perf = perf_counter()
-            process_graph(filename, args.num_col, args.timeout * 60, args.A, args.alpha, args.p_max, args.do_opt)
-            print("#%d overall duration for %s: %f s\n"
-                  % (re_run + 1, filename, perf_counter() - sample_start_perf))
+            coloring, _ = process_graph(filename,
+                                        args.num_col,
+                                        args.timeout * 60,
+                                        args.A,
+                                        args.alpha,
+                                        args.p_max,
+                                        args.do_opt,
+                                        args.stop_k)
+            duration = perf_counter() - sample_start_perf
+            # print("#%d overall duration for %s: %f s\n" % (re_run + 1, filename, duration))
+
+            if coloring is not None:
+                statistics.append(duration)
+
+        print("\n==== Statistics ====")
+        if statistics != []:
+            variance_ = stdev(statistics) if len(statistics) > 1 else 0
+            print("best/worst: %f / %f" % (min(statistics), max(statistics)))
+            print("std_variation: %f" % variance_)
+            print("mean: %f" % mean(statistics))
+            print("timeouts: %f %%" % ((args.re_runs - len(statistics)) / args.re_runs * 100))
+            print()
+            print("file/best/worst/std_variation/mean/timeout%")
+            print("stats: %s;%f;%f;%f;%f;%f"
+                  % (ntpath.basename(filename), min(statistics), max(statistics), variance_, mean(statistics),
+                     (args.re_runs - len(statistics)) / args.re_runs * 100))
+        else:
+            print("  no statistics available; timeouts: 100% of", args.re_runs)
+        print("======================\n")
 
 
 def init_gamma(adj_matrix, gamma, init_coloring):
@@ -74,7 +107,7 @@ def init_gamma(adj_matrix, gamma, init_coloring):
             gamma[node_idx][color] = conflict_count
 
 
-def count_conflicts(adj_matrix, init_coloring) -> int:
+def count_conflicts(adj_matrix, init_coloring, _node_cnt, _nodes) -> int:
     """ evaluation function (Fc) """
     conflict_cnt = 0
     for idx in range(len(adj_matrix)):
@@ -85,10 +118,34 @@ def count_conflicts(adj_matrix, init_coloring) -> int:
     return conflict_cnt
 
 
-def process_graph(filename: str, color_cnt: int, timeout: int, A: int, alpha: float, p_max: int, do_opt: bool):
+def count_conflicts_degree_based(adj_matrix, init_coloring, node_cnt, nodes) -> int:
+    """ evaluation function (Fc) which takes the degree of a conflicting node into account """
+    conflict_cnt = 0
+    conflicting_nodes = node_cnt * [0]
+
+    for idx in range(len(adj_matrix)):
+        for j in range(idx):
+            if adj_matrix[idx][j] and init_coloring[idx] == init_coloring[j]:
+                conflict_cnt += 1
+                conflicting_nodes[idx] += 1
+                conflicting_nodes[j] += 1
+
+    h1 = sum([float(l) / float(len(nodes[i])) for i, l in enumerate(conflicting_nodes)]) / node_cnt
+
+    return conflict_cnt - h1
+
+
+def process_graph(filename: str,
+                  color_cnt: int,
+                  timeout: int,
+                  A: int,
+                  alpha: float,
+                  p_max: int,
+                  do_opt: bool,
+                  stop_k: int):
     name, node_cnt, edge_cnt, nodes = parse(filename)
-    print(filename, "- read complete; nodes: %d, edges: %d, color count: %d, A: %d, alpha: %f, Pmax: %d"
-          % (node_cnt, edge_cnt, color_cnt, A, alpha, p_max))
+    print(filename, "- read complete; nodes: %d, edges: %d, color count: %d, A: %d, alpha: %f, Pmax: %d, timeout: %d"
+          % (node_cnt, edge_cnt, color_cnt, A, alpha, p_max, timeout))
 
     adj_matrix = [[False for _ in range(node_cnt)] for _ in range(node_cnt)]
     for node in range(node_cnt):
@@ -98,6 +155,9 @@ def process_graph(filename: str, color_cnt: int, timeout: int, A: int, alpha: fl
     # print()
     # print_adj_matrix(adj_matrix)
 
+    evaluation_fu = count_conflicts_degree_based
+    # evaluation_fu = count_conflicts
+
     job_done = False
     gamma = [color_cnt * [0] for _ in range(node_cnt)]
 
@@ -106,7 +166,7 @@ def process_graph(filename: str, color_cnt: int, timeout: int, A: int, alpha: fl
 
         min_conflicts = 1_000_000
 
-        print("\n== Select a random %d coloring of %d nodes" % (color_cnt, node_cnt))
+        # print("\n== Select a random %d coloring of %d nodes" % (color_cnt, node_cnt))
         coloring = [randint(0, color_cnt - 1) for _ in range(node_cnt)]
         best_coloring = None
 
@@ -127,7 +187,7 @@ def process_graph(filename: str, color_cnt: int, timeout: int, A: int, alpha: fl
             if iter_counter % 1_000_000 == 0:
                 print("  iteration", "{:_}".format(iter_counter))
 
-            conflict_cnt = count_conflicts(adj_matrix, coloring)
+            conflict_cnt = evaluation_fu(adj_matrix, coloring, node_cnt, nodes)
 
             # reactive increasing of tl size
             if old_conflict_cnt == conflict_cnt:
@@ -155,7 +215,7 @@ def process_graph(filename: str, color_cnt: int, timeout: int, A: int, alpha: fl
 
                 if conflict_cnt == 0 and color_cnt <= 3:
                     job_done = True
-                    return best_coloring
+                    return best_coloring, iter_counter
                 elif conflict_cnt == 0:
                     break
 
@@ -188,17 +248,20 @@ def process_graph(filename: str, color_cnt: int, timeout: int, A: int, alpha: fl
 
             iter_counter += 1
             if iter_counter == MAX_ITERATIONS:
-                print("Max iteration count reached (%d), aborting search" % MAX_ITERATIONS)
-                return None
+                print("Max iteration count reached (%d), aborting search for k=%d" % (MAX_ITERATIONS, color_cnt))
+                return None, iter_counter
 
-            if (perf_counter() - start_time) > timeout:
-                print("Timeout reached (%d), aborting search" % timeout)
-                return None
+            if timeout != 0 and (perf_counter() - start_time) > timeout:
+                # print("Timeout reached (%d), aborting search for k=%d" % (timeout, color_cnt))
+                print()
+                print(filename, "\t%d" % color_cnt)
+                return None, iter_counter
 
-        print("Found solution within %f min" % ((perf_counter() - start_time) / 60.))
+        # print("Found solution within %f min" % ((perf_counter() - start_time) / 60.))
+        print('.', end='', flush=True)
         # print_matrix([best_coloring])
-        if not do_opt:
-            return best_coloring
+        if not do_opt or color_cnt <= stop_k:
+            return best_coloring, iter_counter
 
         color_cnt -= 1
 
